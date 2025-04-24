@@ -23,7 +23,7 @@ An intelligent scheduling assistant that helps you organize your day by auto-ass
 ### 1. Clone the Repository
 
 
-git clone https://github.com/your-username/ai_schedule_optimizer.git
+git clone https://github.com/eminos-sd/ai_schedule_optimizer.git
 cd ai_schedule_optimizer
 
 
