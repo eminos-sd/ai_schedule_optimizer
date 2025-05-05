@@ -1,81 +1,129 @@
 import streamlit as st
-
-st.title("AI Schedule Optimizer")
-
-st.header("Add Your Tasks")
-
-tasks = []
-task_count = st.number_input("How many tasks?", min_value=1, max_value=20, step=1)
-
-for i in range(task_count):
-    with st.expander(f"Task {i+1}"):
-        name = st.text_input(f"Task {i+1} name", key=f"name_{i}")
-        duration = st.number_input(f"Duration (minutes)", min_value=5, step=5, key=f"duration_{i}")
-        priority = st.selectbox(f"Priority", ["High", "Medium", "Low"], key=f"priority_{i}")
-        tasks.append({"name": name, "duration": duration, "priority": priority})
-
-st.write("Tasks:", tasks)
-
-
 from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 
-def schedule_tasks(tasks, total_minutes):
+
+# 🔧 Utility functions
+def time_to_minutes(t):
+    return int(datetime.strptime(t, "%H:%M").hour * 60 + datetime.strptime(t, "%H:%M").minute)
+
+
+def minutes_to_time(m):
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def define_available_slots(slots):
+    return [(time_to_minutes(start), time_to_minutes(end)) for start, end in slots]
+
+
+# 🧠 Scheduling Logic
+def schedule_tasks(tasks, available_slots, break_duration=10):
     model = cp_model.CpModel()
+    task_vars = {}
 
-    starts = []
-    intervals = []
-    priority_score = {"High": 3, "Medium": 2, "Low": 1}
+    # Generate task intervals
+    for task in tasks:
+        name, duration, priority = task
+        start_var = model.NewIntVar(0, 24 * 60, f"start_{name}")
+        end_var = model.NewIntVar(0, 24 * 60, f"end_{name}")
+        interval = model.NewIntervalVar(start_var, duration, end_var, f"interval_{name}")
+        task_vars[name] = (start_var, end_var, interval)
 
-    for i, task in enumerate(tasks):
-        duration = task["duration"]
-        start = model.NewIntVar(0, total_minutes - duration, f"start_{i}")
-        end = model.NewIntVar(duration, total_minutes, f"end_{i}")
-        interval = model.NewIntervalVar(start, duration, end, f"interval_{i}")
+    # No overlap
+    model.AddNoOverlap([t[2] for t in task_vars.values()])
 
-        starts.append(start)
-        intervals.append(interval)
+    # Time windows constraint
+    all_times = []
+    for start, end in available_slots:
+        all_times.extend(range(start, end))
+    for name, (start_var, end_var, _) in task_vars.items():
+        model.AddAllowedAssignments([start_var], [[t] for t in all_times])
 
-    model.AddNoOverlap(intervals)
-
-    model.Maximize(
-        sum(priority_score[t["priority"]] * (total_minutes - starts[i])
-            for i, t in enumerate(tasks))
-    )
-
+    # Solve
     solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 5.0
     status = solver.Solve(model)
 
-    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        result = []
-        base_time = datetime.strptime("09:00", "%H:%M")
-        for i, task in enumerate(tasks):
-            start_min = solver.Value(starts[i])
-            start_time = base_time + timedelta(minutes=start_min)
-            end_time = start_time + timedelta(minutes=task["duration"])
-            result.append({
-                "name": task["name"],
-                "start": start_time.strftime("%H:%M"),
-                "end": end_time.strftime("%H:%M"),
-                "priority": task["priority"]
-            })
-        return sorted(result, key=lambda x: x["start"])
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        schedule = []
+        for name in task_vars:
+            start = solver.Value(task_vars[name][0])
+            end = solver.Value(task_vars[name][1])
+            schedule.append((name, start, end))
+        # Sort by start time
+        schedule.sort(key=lambda x: x[1])
+
+        # Insert breaks
+        final_schedule = []
+        for i, (name, start, end) in enumerate(schedule):
+            final_schedule.append((name, start, end))
+            if i < len(schedule) - 1:
+                next_start = schedule[i + 1][1]
+                if next_start - end >= break_duration:
+                    final_schedule.append(("Break", end, end + break_duration))
+
+        return final_schedule
     else:
-        return None
+        unscheduled_tasks = [task[0] for task in tasks]
+        return f"❗ Unable to fit all tasks. Try reducing durations or extending available time.\nTasks: {unscheduled_tasks}"
 
 
+# 🖼 Streamlit UI
+st.set_page_config(page_title="🧠 Smart Day Scheduler", layout="centered")
+st.title("🧠 Intelligent Scheduling Assistant")
 
-st.header("Set Available Time")
+st.markdown("Enter your **tasks**, your **available time slots**, and get an optimized schedule!")
 
-total_minutes = st.slider("Total available time (minutes)", 30, 480, 240, step=15)
+# 🎯 Enter tasks
+st.header("1️⃣ Tasks")
+task_data = st.data_editor(
+    {
+        "Task Name": ["Emails", "Study", "Workout"],
+        "Duration (mins)": [30, 120, 60],
+        "Priority (1=High)": [3, 1, 2]
+    },
+    num_rows="dynamic",
+    use_container_width=True,
+)
 
-if st.button("Optimize Schedule"):
-    valid_tasks = [t for t in tasks if t["name"] and t["duration"] > 0]
-    schedule = schedule_tasks(valid_tasks, total_minutes)
 
-    if schedule:
-        st.success("Schedule Created:")
-        for t in schedule:
-            st.write(f"{t['start']} - {t['end']}: {t['name']} ({t['priority']})")
-    else:
-        st.error("Could not generate schedule. Try with fewer tasks or longer available time.")
+# ⏰ Time slots
+st.header("2️⃣ Available Time Slots")
+slot_count = st.number_input("How many time slots are you available?", 1, 5, value=2)
+slots = []
+for i in range(slot_count):
+    col1, col2 = st.columns(2)
+    with col1:
+        start = st.time_input(f"Slot {i+1} start", value=datetime.strptime("09:00", "%H:%M").time(), key=f"start_{i}")
+    with col2:
+        end = st.time_input(f"Slot {i+1} end", value=datetime.strptime("12:00", "%H:%M").time(), key=f"end_{i}")
+    slots.append((start.strftime("%H:%M"), end.strftime("%H:%M")))
+
+# 🧘 Break duration
+break_duration = st.slider("Break Duration Between Tasks (minutes)", 0, 30, 10)
+
+# 🔘 Button
+if st.button("📅 Generate My Schedule"):
+    try:
+        tasks = []
+        for i in range(len(task_data["Task Name"])):
+            name = task_data["Task Name"][i]
+            duration = int(task_data["Duration (mins)"][i])
+            priority = int(task_data["Priority (1=High)"][i])
+            if name.strip():
+                tasks.append((name, duration, priority))
+
+        available_minutes = define_available_slots(slots)
+
+        result = schedule_tasks(tasks, available_minutes, break_duration)
+
+        if isinstance(result, str):
+            st.error(result)
+        else:
+            st.success("✅ Optimized Schedule Created!")
+            for name, start, end in result:
+                emoji = "☕" if name == "Break" else "✅"
+                st.write(f"{emoji} **{name}**: {minutes_to_time(start)} – {minutes_to_time(end)}")
+
+    except Exception as e:
+        st.error(f"⚠️ Error: {e}")
